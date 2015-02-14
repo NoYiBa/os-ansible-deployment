@@ -14,9 +14,13 @@ global_overrides:
           name: default
           index: 0
           default: True
+
 swift-proxy_hosts:
   aio1:
     ip: 172.29.236.100
+
 swift_hosts:
   aio1:
     ip: 172.29.236.100
+    container_vars:
+      swift_vars:

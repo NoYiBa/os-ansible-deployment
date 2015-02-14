@@ -1,1 +1,8 @@
-deprecated/deprecated.yml
+---
+- name: Setup repo servers
+  hosts: localhost
+  user: root
+  tasks:
+    - name: Deprecated
+      shell: echo "this is deprecated please go to the playbooks directory"
+

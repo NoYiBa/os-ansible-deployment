@@ -15,27 +15,62 @@
 #
 # (c) 2014, Kevin Carter <kevin.carter@rackspace.com>
 
-set -e -u -v +x
+## Shell Opts ----------------------------------------------------------------
+set -e -u -v -x
 
-## Variables -----------------------------------------------------------------
 
-ANSIBLE_DEPLOY_METHOD="pip"
-ANSIBLE_GIT_REPO="https://github.com/ansible/ansible"
-ANSIBLE_GIT_RELEASE="${ANSIBLE_GIT_RELEASE:-1.6.10}"
-ANSIBLE_WORKING_DIR="/opt/ansible_v${ANSIBLE_GIT_RELEASE}"
-GET_PIP_URL="${GET_PIP_URL:-https://mirror.rackspace.com/rackspaceprivatecloud/downloads/get-pip.py}"
+## Vars ----------------------------------------------------------------------
+export ANSIBLE_GIT_REPO=${ANSIBLE_GIT_REPO:-"https://github.com/ansible/ansible"}
+export ANSIBLE_GIT_RELEASE=${ANSIBLE_GIT_RELEASE:-"v1.8.2"}
+export ANSIBLE_WORKING_DIR=${ANSIBLE_WORKING_DIR:-/opt/ansible_${ANSIBLE_GIT_RELEASE}}
+export GET_PIP_URL=${GET_PIP_URL:-"https://bootstrap.pypa.io/get-pip.py"}
+export SSH_DIR=${SSH_DIR:-"/root/.ssh"}
+export ANSIBLE_ROLE_FILE=${ANSIBLE_ROLE_FILE:-"ansible-role-requirements.yml"}
+export UPDATE_ANSIBLE_REQUIREMENTS=${UPDATE_ANSIBLE_REQUIREMENTS:-"yes"}
 
-## Functions -----------------------------------------------------------------
+# Export known paths
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-info_block "Checking for required libraries." || source $(dirname ${0})/scripts-library.sh
 
 ## Main ----------------------------------------------------------------------
+echo "Bootstrapping System with Ansible"
 
-# Enable logging of all commands executed
-set -x
+# Check that we are in the root path of the cloned repo
+if [ ! -d "playbooks" ];then
+    echo "Please execute the gate scripts from the root directory of the cloned source code."
+    echo -e "Example: /opt/os-ansible-deployment/\n"
+    exit_state 99
+fi
+
+# Create the ssh dir if needed
+if [ ! -d "${SSH_DIR}" ];then
+    mkdir -p "${SSH_DIR}"
+    chmod 700 "${SSH_DIR}"
+fi
+
+# Make the system key used for bootstrapping self if needed
+if [ ! -f "${SSH_DIR}/id_rsa" ];then
+    echo y | ssh-keygen -t rsa -f "${SSH_DIR}/id_rsa" -N ''
+    pushd "${SSH_DIR}"
+        cat id_rsa.pub | tee -a authorized_keys
+    popd
+fi
 
 # Install the base packages
-apt-get update && apt-get -y install git python-all python-dev curl
+(apt-get update && apt-get -y install git python-all python-dev curl autoconf g++ python2.7-dev) || yum install git python-devel curl
+
+# If the working directory exists remove it
+if [ -d "${ANSIBLE_WORKING_DIR}" ];then
+    rm -rf "${ANSIBLE_WORKING_DIR}"
+fi
+
+# Clone down the base ansible source
+git clone "${ANSIBLE_GIT_REPO}" "${ANSIBLE_WORKING_DIR}"
+pushd "${ANSIBLE_WORKING_DIR}"
+    git checkout "${ANSIBLE_GIT_RELEASE}"
+    git submodule update --init --recursive
+popd
+
 
 # Install pip
 if [ ! "$(which pip)" ];then
@@ -43,30 +78,26 @@ if [ ! "$(which pip)" ];then
     python2 /opt/get-pip.py || python /opt/get-pip.py
 fi
 
-if [ "${ANSIBLE_DEPLOY_METHOD}" == "git" ]; then
-  # If the working directory exists remove it
-  if [ -d "${ANSIBLE_WORKING_DIR}" ];then
-    rm -rf "${ANSIBLE_WORKING_DIR}"
-  fi
-  # Clone down the base ansible source
-  git clone "${ANSIBLE_GIT_REPO}" "${ANSIBLE_WORKING_DIR}"
-  pushd "${ANSIBLE_WORKING_DIR}"
-    git checkout "v${ANSIBLE_GIT_RELEASE}"
-    git submodule update --init --recursive
-  popd
-  # Install requirements if there are any
-  if [ -f "${ANSIBLE_WORKING_DIR}/requirements.txt" ];then
-    pip2 install -r "${ANSIBLE_WORKING_DIR}/requirements.txt" || pip install -r "${ANSIBLE_WORKING_DIR}/requirements.txt"
-  fi
-  # Install ansible
-  pip2 install "${ANSIBLE_WORKING_DIR}" || pip install "${ANSIBLE_WORKING_DIR}"
-else
-  # Use pip to install ansible
-  pip install ansible==${ANSIBLE_GIT_RELEASE}
+# Install requirements if there are any
+if [ -f "requirements.txt" ];then
+    pip2 install -r requirements.txt || pip install -r requirements.txt
 fi
 
-set +x
-info_block "Ansible is now bootstrapped and ready for use."
+# Install ansible
+pip2 install "${ANSIBLE_WORKING_DIR}" || pip install "${ANSIBLE_WORKING_DIR}"
+
+# Update dependent roles
+if [ -f "ansible-role-requirements.yml" ];then
+    # Update or create the roles manifest
+    if [ "${UPDATE_ANSIBLE_REQUIREMENTS}" == "yes" ];then
+        ./scripts/os-ansible-role-requirements.py --requirement-file ${ANSIBLE_ROLE_FILE} update
+    fi
+    # Pull all required roles.
+    ansible-galaxy install --role-file=${ANSIBLE_ROLE_FILE} \
+                           --roles-path=playbooks/roles/ \
+                           --ignore-errors \
+                           --force
+fi
 
 # Create openstack ansible wrapper tool
 cat > /usr/local/bin/openstack-ansible <<EOF
@@ -87,25 +118,26 @@ cat > /usr/local/bin/openstack-ansible <<EOF
 #
 # (c) 2014, Kevin Carter <kevin.carter@rackspace.com>
 
-# OpenStack wrapper tool to ease the use of ansible with multiple variable files.
+# Openstack wrapper tool to ease the use of ansible with multiple variable files.
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+function info() {
+    echo -e "\e[0;35m\${@}\e[0m"
+}
+
 # Discover the variable files.
-VAR1="\$(for i in \$(ls /etc/*_deploy/*user_*.yml); do echo -ne "-e @\$i "; done)"
+VAR1="\$(for i in \$(ls /etc/openstack_deploy/user_*.yml); do echo -ne "-e @\$i "; done)"
 
 # Provide information on the discovered variables.
-echo -e "\n--- [ Variable files ] ---\n \"\${VAR1}\""
+info "Variable files: \"\${VAR1}\""
 
 # Run the ansible playbook command.
 \$(which ansible-playbook) \${VAR1} \$@
 EOF
 
-set -x
 # Ensure wrapper tool is executable
 chmod +x /usr/local/bin/openstack-ansible
 
-# Enable logging of all commands executed
-set +x
-
-info_block "The openstack-ansible convenience script has been created."
+echo "openstack-ansible script created."
+echo "System is bootstrapped and ready for use."
